@@ -68,34 +68,59 @@ S3 layout: `s3://<bucket>/tpch/<sf>/<table>/<table>.<part>.parquet`
    be your laptop or a small EC2 instance — it only orchestrates; it is *not* part of
    the benchmark cluster. Install the matching client:
    ```bash
-   python3 -m pip install -r requirements.txt   # or at least: ray[default]==2.44.1 boto3
+   git clone https://github.com/eric-yq/ray-spark-on-graviton.git
+   yum install -y python3.11 python3.11-pip
+   python3.11 -m pip install -r requirements.txt # or at least: ray[default]==2.44.1 boto3
    aws configure                                 # creds with EC2 + PassRole permissions
    ```
 3. **An S3 bucket** for data + results.
-4. **An EC2 instance profile** named `ray-bench-node` for the cluster nodes (see below).
+4. **IAM role + instance profile** for the cluster nodes — **auto-created** by
+   `scripts/setup_iam.sh` (idempotent; run on the control machine). No manual
+   IAM console steps.
 
 ### IAM setup
 
-**(a) Instance profile `ray-bench-node`** — attached to head + workers, grants S3 access:
+**(a) Instance profile `ray-bench-node`** — attached to head + workers. Don't
+create it by hand; run the idempotent helper on the control machine — it checks
+and creates only what's missing:
+
+```bash
+BENCH_S3_BUCKET=your-bucket scripts/setup_iam.sh
+```
+
+It ensures a role + same-named instance profile with the policy below. The HEAD's
+autoscaler launches the workers, so EC2 + `iam:PassRole` are needed alongside S3:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
-    {"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"],
+    {"Sid": "S3Data", "Effect": "Allow",
+     "Action": ["s3:GetObject", "s3:ListBucket", "s3:PutObject"],
      "Resource": ["arn:aws:s3:::YOUR_BUCKET", "arn:aws:s3:::YOUR_BUCKET/*"]},
-    {"Effect": "Allow", "Action": ["s3:PutObject"],
-     "Resource": ["arn:aws:s3:::YOUR_BUCKET/results/*", "arn:aws:s3:::YOUR_BUCKET/tpch/*"]}
+    {"Sid": "Ec2LaunchWorkers", "Effect": "Allow",
+     "Action": ["ec2:RunInstances", "ec2:TerminateInstances",
+                "ec2:CreateTags", "ec2:Describe*"],
+     "Resource": "*"},
+    {"Sid": "PassNodeRole", "Effect": "Allow",
+     "Action": "iam:PassRole",
+     "Resource": "arn:aws:iam::ACCOUNT_ID:role/ray-bench-node"}
   ]
 }
 ```
-Create role `ray-bench-node` (trust: ec2.amazonaws.com), attach the policy, and create
-the instance profile of the same name.
+(That JSON is exactly what `setup_iam.sh` applies — shown here for reference.)
+
+> Least privilege: only the **head** actually needs the EC2 + PassRole statements
+> (its autoscaler launches workers). For a stricter setup, split into
+> `ray-bench-head` (S3 + EC2 + PassRole) and `ray-bench-worker` (S3 only), and set
+> the two `IamInstanceProfile.Name` fields in the YAMLs accordingly.
 
 **(b) Control-node credentials** — your IAM user/role needs EC2 permissions to launch
 and manage the cluster (RunInstances, TerminateInstances, Describe*, CreateTags,
-CreateSecurityGroup, etc.) plus `iam:PassRole` for `ray-bench-node`. See the
-[Ray AWS launcher IAM reference](https://docs.ray.io/en/latest/cluster/vms/getting-started.html).
+CreateSecurityGroup, etc.) plus `iam:PassRole` for `ray-bench-node`. To let
+`setup_iam.sh` bootstrap the role, it also needs IAM management perms
+(iam:GetRole/CreateRole/PutRolePolicy, iam:GetInstanceProfile/CreateInstanceProfile/AddRoleToInstanceProfile).
+See the [Ray AWS launcher IAM reference](https://docs.ray.io/en/latest/cluster/vms/getting-started.html).
 
 ---
 
@@ -103,15 +128,17 @@ CreateSecurityGroup, etc.) plus `iam:PassRole` for `ray-bench-node`. See the
 
 All commands run from the repo root on your **control machine** unless noted.
 
-### 1. Configure the cluster YAMLs
+### 1. No YAML editing needed
 
-Resolve the Amazon Linux 2023 AMI for each architecture and paste into the `ImageId` fields:
+The tracked `cluster-m7i.yaml` / `cluster-m8g.yaml` are **templates — leave them
+unedited** so `git pull` never conflicts. `scripts/launch.sh` resolves the AMI and
+renders a gitignored `cluster-<arch>.local.yaml` at launch time. Region/AZ come from
+`BENCH_REGION` / `BENCH_AZ` (default `us-east-1` / `us-east-1a`); the node instance
+profile is `ray-bench-node` (created in step 2).
 
-```bash
-scripts/resolve_ami.sh us-east-1 x86_64    # -> ImageId in infra/ray-cluster/cluster-m7i.yaml
-scripts/resolve_ami.sh us-east-1 arm64     # -> ImageId in infra/ray-cluster/cluster-m8g.yaml
-```
-Also confirm `region`, `availability_zone`, and `IamInstanceProfile.Name` in both YAMLs.
+> Already edited a tracked YAML by hand? Revert it so pulls stay clean:
+> `git checkout -- infra/ray-cluster/cluster-m7i.yaml infra/ray-cluster/cluster-m8g.yaml`
+> then use `scripts/launch.sh` (below) — no manual ImageId editing.
 
 ### 2. Set environment (data + results location)
 
@@ -122,13 +149,21 @@ export BENCH_DATA_PREFIX=s3://your-bucket/tpch
 export BENCH_RESULTS_PREFIX=s3://your-bucket/results
 ```
 
+Create the cluster IAM once (idempotent — checks and creates only what's missing,
+using the control machine's credentials):
+
+```bash
+scripts/setup_iam.sh
+```
+
 ### 3. Launch a cluster
 
 ```bash
-ray up infra/ray-cluster/cluster-m7i.yaml          # ~ a few minutes (installs deps)
-ray rsync-up infra/ray-cluster/cluster-m7i.yaml ./ '~/ray-spark-on-graviton/'   # sync this repo to the head
-ray attach infra/ray-cluster/cluster-m7i.yaml      # SSH into the head node
+scripts/launch.sh m7i                                              # resolve AMI, render, ray up
+ray rsync-up infra/ray-cluster/cluster-m7i.local.yaml ./ '~/ray-spark-on-graviton/'  # sync repo to head
+ray attach   infra/ray-cluster/cluster-m7i.local.yaml             # SSH into the head node
 ```
+Use the rendered `*.local.yaml` (not the template) for every ray command after launch.
 
 ### 4. On the head node: generate data (once) and run the sweep
 
@@ -153,10 +188,10 @@ Results append to `results/results.csv` and upload to `s3://.../results/`.
 
 ```bash
 exit                                               # leave the m7i head
-ray down infra/ray-cluster/cluster-m7i.yaml        # terminate m7i cluster
-ray up infra/ray-cluster/cluster-m8g.yaml
-ray rsync-up infra/ray-cluster/cluster-m8g.yaml ./ '~/ray-spark-on-graviton/'
-ray attach infra/ray-cluster/cluster-m8g.yaml
+ray down infra/ray-cluster/cluster-m7i.local.yaml  # terminate m7i cluster
+scripts/launch.sh m8g
+ray rsync-up infra/ray-cluster/cluster-m8g.local.yaml ./ '~/ray-spark-on-graviton/'
+ray attach   infra/ray-cluster/cluster-m8g.local.yaml
 # on head:
 cd ~/ray-spark-on-graviton
 scripts/run_all.sh --repeat 3 sf10 sf100 sf600     # data already in S3; no regen needed
@@ -180,7 +215,7 @@ Produces `results/comparison.csv` and `results/comparison.md` with, per workload
 ### 7. Tear down
 
 ```bash
-ray down infra/ray-cluster/cluster-m8g.yaml
+ray down infra/ray-cluster/cluster-m8g.local.yaml
 ```
 
 ---
@@ -235,8 +270,8 @@ python3.11 -m benchmarks.ray_spark.run --sf sf100 --workload q5,q9,hybrid_etl --
 ## Project layout
 
 ```
-infra/ray-cluster/   ray up YAMLs (m7i/m8g), node_setup.sh
-scripts/             resolve_ami.sh, run_all.sh, report.py
+infra/ray-cluster/   ray up YAMLs (m7i/m8g), node_setup.sh, ray_systemd.sh
+scripts/             setup_iam.sh, launch.sh, resolve_ami.sh, run_all.sh, report.py
 common/              config, metrics, resource_monitor, runner
 data/generators/     gen_tpch.py (distributed TPC-H -> S3)
 benchmarks/ray_only/ Ray Data/Core workloads + runner
@@ -260,13 +295,45 @@ results/             results.csv, raw/<run_id>.json, comparison.{csv,md}
 | `BENCH_SPARK_EXECUTOR_MEMORY`| `40GB`     | memory per executor |
 | `BENCH_PRICE_<INSTANCE>` | built-in       | e.g. `BENCH_PRICE_M8G_4XLARGE=0.71` |
 
+## Reboot resilience (security-baseline reboots)
+
+Some accounts apply a security baseline to freshly launched EC2 instances and
+**reboot the OS**. Plain `ray start` processes don't survive a reboot, so the
+cluster is built to recover on its own:
+
+- **Ray runs under systemd** (`bench-ray.service`, `Restart=always`, enabled on
+  boot), installed by `ray_systemd.sh` from the start commands. After a reboot,
+  systemd restarts the head/worker Ray process; workers reconnect via the head's
+  private IP (unchanged across a reboot). `JAVA_HOME` / `PYSPARK_PYTHON` are baked
+  into the unit so RayDP's Spark executors still work post-reboot.
+- **Node setup resumes on boot** (`bench-setup.service`, a oneshot enabled early in
+  `node_setup.sh`, guarded by the `/opt/bench/.node_setup_done` sentinel). If a
+  reboot interrupts the dnf/pip install, the next boot re-runs `node_setup.sh`
+  until it completes — the script is idempotent (jars download atomically, already
+  installed packages are skipped).
+
+Verify after bring-up (`ray attach <yaml>` into the head):
+```bash
+systemctl status bench-setup.service bench-ray.service
+ray status
+```
+
+Recovery / caveats:
+- If `ray up` errors because a node rebooted **mid-provision** (before the Ray
+  service was installed), wait for the baseline reboot to settle and re-run
+  `ray up` — setup is idempotent and finishes quickly.
+- If a *worker* reboot during initial bring-up is slow enough that the head
+  autoscaler relaunches it (node churn), either ask for these ephemeral benchmark
+  instances to be excluded from the auto-reboot policy, or pre-bake a golden AMI
+  with the baseline already applied.
+
 ## Troubleshooting
 
 - **Spark `ModuleNotFoundError: No module named 'pyspark'/'ray'` in a python worker**:
   the executor's Python must have ray + pyspark + pyarrow + raydp. On AL2023 the
-  default `python3` is 3.9 (no deps), so the cluster YAMLs pin
-  `PYSPARK_PYTHON=/usr/bin/python3.11` on `ray start`, and node_setup installs all
-  deps into python3.11. Always invoke the driver as `python3.11` (run_all.sh does).
+  default `python3` is 3.9 (no deps), so the `bench-ray` systemd unit pins
+  `PYSPARK_PYTHON=/usr/bin/python3.11` and node_setup installs all deps into
+  python3.11. Always invoke the driver as `python3.11` (run_all.sh does).
 - **Spark can't read S3** (`No FileSystem for scheme s3a`): node_setup stages
   `hadoop-aws:3.3.4` + `aws-java-sdk-bundle` into `pyspark/jars`; ensure setup_commands
   completed. Spark reads use the `s3a://` scheme and the EC2 instance role.

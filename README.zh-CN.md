@@ -63,33 +63,55 @@ S3 目录结构:`s3://<bucket>/tpch/<sf>/<table>/<table>.<part>.parquet`
 2. **一台控制机**,装好 Ray 并配置好 AWS 凭证。可以是你的笔记本或一台小 EC2 —— 它只负责
    编排,**不属于** benchmark 集群。安装匹配的客户端:
    ```bash
-   python3 -m pip install -r requirements.txt   # 或至少:ray[default]==2.44.1 boto3
+   git clone https://github.com/eric-yq/ray-spark-on-graviton.git
+   yum install -y python3.11 python3.11-pip
+   python3.11 -m pip install -r requirements.txt   # 或至少:ray[default]==2.44.1 boto3
    aws configure                                 # 凭证需具备 EC2 + PassRole 权限
    ```
 3. **一个 S3 桶**,用于存数据和结果。
-4. **一个名为 `ray-bench-node` 的 EC2 实例 profile**,供集群节点使用(见下)。
+4. **集群节点的 IAM 角色 + 实例 profile** —— 由 `scripts/setup_iam.sh` **自动创建**
+   (幂等;在控制机上跑)。不需要手动到 IAM 控制台建。
 
 ### IAM 配置
 
-**(a) 实例 profile `ray-bench-node`** —— 挂在 head + worker 上,授予 S3 访问:
+**(a) 实例 profile `ray-bench-node`** —— 挂在 head + worker 上。**不用手动建**,在控制机上
+跑这个幂等脚本即可(存在就跳过,缺啥建啥):
+
+```bash
+BENCH_S3_BUCKET=your-bucket scripts/setup_iam.sh
+```
+
+它会确保有一个角色 + 同名实例 profile,策略如下。**worker 是 head 的 autoscaler 创建的**,
+所以除了 S3 还需要 EC2 + `iam:PassRole`:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
-    {"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"],
+    {"Sid": "S3Data", "Effect": "Allow",
+     "Action": ["s3:GetObject", "s3:ListBucket", "s3:PutObject"],
      "Resource": ["arn:aws:s3:::YOUR_BUCKET", "arn:aws:s3:::YOUR_BUCKET/*"]},
-    {"Effect": "Allow", "Action": ["s3:PutObject"],
-     "Resource": ["arn:aws:s3:::YOUR_BUCKET/results/*", "arn:aws:s3:::YOUR_BUCKET/tpch/*"]}
+    {"Sid": "Ec2LaunchWorkers", "Effect": "Allow",
+     "Action": ["ec2:RunInstances", "ec2:TerminateInstances",
+                "ec2:CreateTags", "ec2:Describe*"],
+     "Resource": "*"},
+    {"Sid": "PassNodeRole", "Effect": "Allow",
+     "Action": "iam:PassRole",
+     "Resource": "arn:aws:iam::ACCOUNT_ID:role/ray-bench-node"}
   ]
 }
 ```
-创建角色 `ray-bench-node`(信任主体:ec2.amazonaws.com),附上该策略,并创建同名实例 profile。
+(上面这段就是 `setup_iam.sh` 实际写入的策略,这里只是给你参考。)
+
+> 最小权限:其实只有 **head** 需要 EC2 + PassRole 这两段(它的 autoscaler 拉 worker)。
+> 想更严格就拆成 `ray-bench-head`(S3 + EC2 + PassRole)和 `ray-bench-worker`(仅 S3),
+> 并把两个 YAML 里的 `IamInstanceProfile.Name` 分别改成对应名字。
 
 **(b) 控制机凭证** —— 你的 IAM 用户/角色需要具备启动和管理集群的 EC2 权限(RunInstances、
 TerminateInstances、Describe*、CreateTags、CreateSecurityGroup 等),外加对 `ray-bench-node`
-的 `iam:PassRole`。参见
-[Ray AWS launcher IAM 文档](https://docs.ray.io/en/latest/cluster/vms/getting-started.html)。
+的 `iam:PassRole`。另外为了让 `setup_iam.sh` 能自动建角色,还需要 IAM 管理权限
+(iam:GetRole/CreateRole/PutRolePolicy、iam:GetInstanceProfile/CreateInstanceProfile/AddRoleToInstanceProfile)。
+参见 [Ray AWS launcher IAM 文档](https://docs.ray.io/en/latest/cluster/vms/getting-started.html)。
 
 ---
 
@@ -97,15 +119,16 @@ TerminateInstances、Describe*、CreateTags、CreateSecurityGroup 等),外加对
 
 除特别说明外,所有命令都在**控制机**上的仓库根目录执行。
 
-### 1. 配置集群 YAML
+### 1. 不需要改 YAML
 
-为每个架构解析 Amazon Linux 2023 AMI,填入 `ImageId` 字段:
+被跟踪的 `cluster-m7i.yaml` / `cluster-m8g.yaml` 是**模板,不要改**,这样 `git pull` 永远不冲突。
+`scripts/launch.sh` 会在拉起时自动解析 AMI,并渲染出一份 gitignore 的 `cluster-<arch>.local.yaml`。
+region/AZ 取自 `BENCH_REGION` / `BENCH_AZ`(默认 `us-east-1` / `us-east-1a`);节点实例 profile 是
+`ray-bench-node`(第 2 步创建)。
 
-```bash
-scripts/resolve_ami.sh us-east-1 x86_64    # -> 填到 infra/ray-cluster/cluster-m7i.yaml 的 ImageId
-scripts/resolve_ami.sh us-east-1 arm64     # -> 填到 infra/ray-cluster/cluster-m8g.yaml 的 ImageId
-```
-同时确认两个 YAML 里的 `region`、`availability_zone`、`IamInstanceProfile.Name`。
+> 已经手改过被跟踪的 YAML 了?先还原,保证 pull 干净:
+> `git checkout -- infra/ray-cluster/cluster-m7i.yaml infra/ray-cluster/cluster-m8g.yaml`
+> 之后用下面的 `scripts/launch.sh` —— 不用再手填 ImageId。
 
 ### 2. 设置环境变量(数据 + 结果位置)
 
@@ -116,13 +139,20 @@ export BENCH_DATA_PREFIX=s3://your-bucket/tpch
 export BENCH_RESULTS_PREFIX=s3://your-bucket/results
 ```
 
+一次性创建集群所需 IAM(幂等 —— 用控制机的凭证检查并只补缺失的):
+
+```bash
+scripts/setup_iam.sh
+```
+
 ### 3. 拉起一套集群
 
 ```bash
-ray up infra/ray-cluster/cluster-m7i.yaml          # 几分钟(会装依赖)
-ray rsync-up infra/ray-cluster/cluster-m7i.yaml ./ '~/ray-spark-on-graviton/'   # 把本仓库同步到 head
-ray attach infra/ray-cluster/cluster-m7i.yaml      # SSH 进 head 节点
+scripts/launch.sh m7i                                              # 解析 AMI、渲染、ray up
+ray rsync-up infra/ray-cluster/cluster-m7i.local.yaml ./ '~/ray-spark-on-graviton/'  # 把仓库同步到 head
+ray attach   infra/ray-cluster/cluster-m7i.local.yaml             # SSH 进 head
 ```
+拉起之后所有 ray 命令都用渲染出来的 `*.local.yaml`(不是模板)。
 
 ### 4. 在 head 上:生成数据(一次)并跑全套
 
@@ -147,10 +177,10 @@ scripts/run_all.sh --repeat 3 sf10 sf100 sf600
 
 ```bash
 exit                                               # 退出 m7i head
-ray down infra/ray-cluster/cluster-m7i.yaml        # 销毁 m7i 集群
-ray up infra/ray-cluster/cluster-m8g.yaml
-ray rsync-up infra/ray-cluster/cluster-m8g.yaml ./ '~/ray-spark-on-graviton/'
-ray attach infra/ray-cluster/cluster-m8g.yaml
+ray down infra/ray-cluster/cluster-m7i.local.yaml  # 销毁 m7i 集群
+scripts/launch.sh m8g
+ray rsync-up infra/ray-cluster/cluster-m8g.local.yaml ./ '~/ray-spark-on-graviton/'
+ray attach   infra/ray-cluster/cluster-m8g.local.yaml
 # 在 head 上:
 cd ~/ray-spark-on-graviton
 scripts/run_all.sh --repeat 3 sf10 sf100 sf600     # 数据已在 S3,无需重新生成
@@ -174,7 +204,7 @@ python scripts/report.py --from-s3 s3://your-bucket/results
 ### 7. 销毁集群
 
 ```bash
-ray down infra/ray-cluster/cluster-m8g.yaml
+ray down infra/ray-cluster/cluster-m8g.local.yaml
 ```
 
 ---
@@ -226,8 +256,8 @@ python3.11 -m benchmarks.ray_spark.run --sf sf100 --workload q5,q9,hybrid_etl --
 ## 项目结构
 
 ```
-infra/ray-cluster/   ray up 配置(m7i/m8g)、node_setup.sh
-scripts/             resolve_ami.sh、run_all.sh、report.py
+infra/ray-cluster/   ray up 配置(m7i/m8g)、node_setup.sh、ray_systemd.sh
+scripts/             setup_iam.sh、launch.sh、resolve_ami.sh、run_all.sh、report.py
 common/              config、metrics、resource_monitor、runner
 data/generators/     gen_tpch.py(分布式 TPC-H -> S3)
 benchmarks/ray_only/ Ray Data/Core 负载 + 运行器
@@ -251,11 +281,37 @@ results/             results.csv、raw/<run_id>.json、comparison.{csv,md}
 | `BENCH_SPARK_EXECUTOR_MEMORY`| `40GB`     | 每 executor 内存 |
 | `BENCH_PRICE_<INSTANCE>` | 内置           | 例如 `BENCH_PRICE_M8G_4XLARGE=0.71` |
 
+## reboot 自愈(安全基线 reboot)
+
+有些账号会对新建 EC2 实例跑安全基线并 **reboot OS**。普通 `ray start` 进程扛不过 reboot,
+所以集群被设计成能自动恢复:
+
+- **Ray 跑在 systemd 下**(`bench-ray.service`,`Restart=always`,开机自启),由 start 命令
+  里的 `ray_systemd.sh` 安装。reboot 后 systemd 把 head/worker 的 Ray 进程拉回来;worker 用
+  head 的私有 IP 重连(reboot 不变 IP)。`JAVA_HOME` / `PYSPARK_PYTHON` 写进了 unit,所以
+  reboot 后 RayDP 的 Spark executor 仍然正常。
+- **节点 setup 开机续跑**(`bench-setup.service`,oneshot,在 `node_setup.sh` 最前面就启用,
+  用 `/opt/bench/.node_setup_done` 哨兵守门)。如果 reboot 打断了 dnf/pip,下次开机会自动
+  重跑 `node_setup.sh` 直到完成 —— 脚本是幂等的(jar 原子下载、已装的包跳过)。
+
+起好集群后验证(`ray attach <yaml>` 进 head):
+```bash
+systemctl status bench-setup.service bench-ray.service
+ray status
+```
+
+恢复 / 注意事项:
+- 如果 `ray up` 因为节点在**配置中途**(Ray 服务还没装上时)reboot 而报错,等基线 reboot
+  稳定后**重跑 `ray up`** 即可 —— setup 幂等,很快补齐。
+- 如果某个 **worker** 初次拉起时 reboot 太慢,导致 head 的 autoscaler 把它当失败重新拉
+  (出现节点反复重建),要么申请把这些临时 benchmark 实例排除出自动 reboot 策略,要么改用
+  预烘焙好基线的 golden AMI。
+
 ## 排错
 
 - **Spark 的 python worker 报 `ModuleNotFoundError: No module named 'pyspark'/'ray'`**:
   executor 的 Python 必须能 import ray + pyspark + pyarrow + raydp。AL2023 默认 `python3`
-  是 3.9(没有这些依赖),所以集群 YAML 在 `ray start` 上固定了
+  是 3.9(没有这些依赖),所以 `bench-ray` 的 systemd unit 固定了
   `PYSPARK_PYTHON=/usr/bin/python3.11`,node_setup 也把所有依赖装进 python3.11。
   driver 一律用 `python3.11` 启动(run_all.sh 已默认如此)。
 - **Spark 无法读 S3**(`No FileSystem for scheme s3a`):node_setup 会把

@@ -66,22 +66,15 @@ head_node_type: head
 file_mounts:
   "/home/ec2-user/bench/requirements.txt": "requirements.txt"
   "/home/ec2-user/bench/node_setup.sh": "infra/ray-cluster/node_setup.sh"
+  "/home/ec2-user/bench/ray_systemd.sh": "infra/ray-cluster/ray_systemd.sh"
 
 setup_commands:
   - bash /home/ec2-user/bench/node_setup.sh
 
+# Ray runs as a systemd service (Restart=always, enabled on boot) so it survives
+# the account's security-baseline reboot. See infra/ray-cluster/ray_systemd.sh.
 head_start_ray_commands:
-  - ray stop
-  - >-
-    PYSPARK_PYTHON=/usr/bin/python3.11 PYSPARK_DRIVER_PYTHON=/usr/bin/python3.11
-    ray start --head --port=6379
-    --temp-dir=/opt/bench/scratch/ray
-    --dashboard-host=0.0.0.0
-    --autoscaling-config=~/ray_bootstrap_config.yaml
+  - bash /home/ec2-user/bench/ray_systemd.sh head
 
 worker_start_ray_commands:
-  - ray stop
-  - >-
-    PYSPARK_PYTHON=/usr/bin/python3.11 PYSPARK_DRIVER_PYTHON=/usr/bin/python3.11
-    ray start --address=$RAY_HEAD_IP:6379
-    --temp-dir=/opt/bench/scratch/ray
+  - bash /home/ec2-user/bench/ray_systemd.sh worker $RAY_HEAD_IP
