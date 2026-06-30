@@ -37,6 +37,16 @@ def init_spark(cfg: BenchConfig, app_name: str = "ray-spark-bench"):
     if jh:
         os.environ["JAVA_HOME"] = jh
 
+    # CRITICAL: PySpark resolves the executor's Python-worker interpreter from the
+    # DRIVER's PYSPARK_PYTHON env at SparkContext creation (it defaults to the
+    # literal 'python3' -> AL2023's 3.9, which has no pyspark). Pin it here, in
+    # the driver's own os.environ, to this interpreter (python3.11) so the hybrid
+    # `to_spark` path's Python workers can import pyspark/ray/pyarrow. Setting only
+    # the SparkConf is NOT enough — the env var is what PySpark embeds into tasks.
+    worker_py = os.environ.get("BENCH_SPARK_WORKER_PY", sys.executable)
+    os.environ["PYSPARK_PYTHON"] = worker_py
+    os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+
     num_executors = int(os.environ.get("BENCH_SPARK_EXECUTORS", cfg.num_workers))
     cores = int(os.environ.get("BENCH_SPARK_EXECUTOR_CORES", "15"))
     memory = os.environ.get("BENCH_SPARK_EXECUTOR_MEMORY", "40GB")
