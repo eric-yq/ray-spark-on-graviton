@@ -1,5 +1,6 @@
 # ===========================================================================
 # Ray cluster launcher config  —  m8g  (AWS Graviton4, aarch64)
+# Base image: Amazon Linux 2023 (standard, default kernel).
 # ===========================================================================
 # Launch from the CONTROL NODE, at the repo root:
 #     ray up infra/ray-cluster/cluster-m8g.yaml
@@ -23,7 +24,7 @@ provider:
   cache_stopped_nodes: false
 
 auth:
-  ssh_user: ubuntu
+  ssh_user: ec2-user                   # Amazon Linux 2023 default user
 
 available_node_types:
   head:
@@ -32,11 +33,11 @@ available_node_types:
     resources: {}
     node_config:
       InstanceType: m8g.2xlarge        # 8 vCPU / 32 GiB
-      ImageId: ami-REPLACE_ARM64       # Ubuntu 22.04 arm64  (scripts/resolve_ami.sh)
+      ImageId: ami-REPLACE_ARM64       # AL2023 arm64  (scripts/resolve_ami.sh us-east-1 arm64)
       IamInstanceProfile:
         Name: ray-bench-node
       BlockDeviceMappings:
-        - DeviceName: /dev/sda1
+        - DeviceName: /dev/xvda        # AL2023 root device is xvda (NOT sda1)
           Ebs:
             VolumeSize: 150
             VolumeType: gp3
@@ -52,7 +53,7 @@ available_node_types:
       IamInstanceProfile:
         Name: ray-bench-node
       BlockDeviceMappings:
-        - DeviceName: /dev/sda1        # SINGLE 600GB gp3 root: data scratch + Ray/Spark spill
+        - DeviceName: /dev/xvda        # SINGLE 600GB gp3 root: data scratch + Ray/Spark spill
           Ebs:
             VolumeSize: 600
             VolumeType: gp3
@@ -63,16 +64,16 @@ available_node_types:
 head_node_type: head
 
 file_mounts:
-  "/home/ubuntu/bench/requirements.txt": "requirements.txt"
-  "/home/ubuntu/bench/node_setup.sh": "infra/ray-cluster/node_setup.sh"
+  "/home/ec2-user/bench/requirements.txt": "requirements.txt"
+  "/home/ec2-user/bench/node_setup.sh": "infra/ray-cluster/node_setup.sh"
 
 setup_commands:
-  - bash /home/ubuntu/bench/node_setup.sh
+  - bash /home/ec2-user/bench/node_setup.sh
 
 head_start_ray_commands:
   - ray stop
   - >-
-    PYSPARK_PYTHON=/usr/bin/python3.10 PYSPARK_DRIVER_PYTHON=/usr/bin/python3.10
+    PYSPARK_PYTHON=/usr/bin/python3.11 PYSPARK_DRIVER_PYTHON=/usr/bin/python3.11
     ray start --head --port=6379
     --temp-dir=/opt/bench/scratch/ray
     --dashboard-host=0.0.0.0
@@ -81,6 +82,6 @@ head_start_ray_commands:
 worker_start_ray_commands:
   - ray stop
   - >-
-    PYSPARK_PYTHON=/usr/bin/python3.10 PYSPARK_DRIVER_PYTHON=/usr/bin/python3.10
+    PYSPARK_PYTHON=/usr/bin/python3.11 PYSPARK_DRIVER_PYTHON=/usr/bin/python3.11
     ray start --address=$RAY_HEAD_IP:6379
     --temp-dir=/opt/bench/scratch/ray

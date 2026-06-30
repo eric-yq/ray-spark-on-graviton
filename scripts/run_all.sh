@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."   # repo root
 
 ENGINES="ray,rayspark"
 REPEAT="${BENCH_REPEAT:-3}"
-PY="${BENCH_PYTHON:-python3}"
+PY="${BENCH_PYTHON:-python3.11}"    # AL2023: deps live in python3.11, not the default python3 (3.9)
 SFS=()
 
 while [[ $# -gt 0 ]]; do

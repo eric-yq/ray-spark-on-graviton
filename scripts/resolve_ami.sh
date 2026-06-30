@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Resolve the latest Canonical Ubuntu 22.04 LTS AMI for a region + architecture
-# from the public SSM parameter store. Paste the output into the cluster YAML's
-# ImageId field.
+# Resolve the latest Amazon Linux 2023 AMI for a region + architecture from the
+# public SSM parameter store. Paste the output into the cluster YAML's ImageId.
+#
+# (The EC2 console "quick start" list is irrelevant — ray up references the AMI
+#  by ID, and these SSM parameters always point at the current AL2023 release.)
 #
 # Usage:
 #   scripts/resolve_ami.sh <region> <arch>
@@ -13,12 +15,13 @@ REGION="${1:-us-east-1}"
 ARCH="${2:-x86_64}"
 
 case "$ARCH" in
-  x86_64|amd64)  CANON_ARCH=amd64 ;;
-  arm64|aarch64) CANON_ARCH=arm64 ;;
+  x86_64|amd64)  AL_ARCH=x86_64 ;;
+  arm64|aarch64) AL_ARCH=arm64 ;;
   *) echo "unknown arch '$ARCH' (use x86_64 or arm64)" >&2; exit 1 ;;
 esac
 
-PARAM="/aws/service/canonical/ubuntu/server/22.04/stable/current/${CANON_ARCH}/hvm/ebs-gp3/ami-id"
+# Standard (non-minimal) AL2023 AMI on the default kernel.
+PARAM="/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-${AL_ARCH}"
 
 echo "region=${REGION} arch=${ARCH} param=${PARAM}" >&2
 aws ssm get-parameter \

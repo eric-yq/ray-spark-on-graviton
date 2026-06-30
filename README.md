@@ -31,12 +31,13 @@ worker holds the OS plus all scratch (Ray object spill + Spark shuffle) under
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| Python    | 3.10    | Ubuntu 22.04 system python; `python3` == 3.10 |
+| OS        | Amazon Linux 2023 | standard AMI, default kernel; both x86_64 + arm64 |
+| Python    | 3.11    | installed via dnf (`python3.11`); AL2023's default `python3` is 3.9 |
 | Ray       | 2.44.1  | `ray[default,data]` |
 | RayDP     | 1.6.5   | Spark-on-Ray (requires ray>=2.37, pyspark<=3.5.7) |
 | PySpark   | 3.5.7   | pip bundle ships Spark + Hadoop 3.3.4 client |
 | PyArrow   | 17.0.0  | |
-| JDK       | Amazon Corretto 17 | apt repo, both arches |
+| JDK       | Amazon Corretto 17 | from AL2023 repos (`java-17-amazon-corretto-devel`), both arches |
 | TPC-H gen | tpchgen-cli 3.x | pure-Rust, ~20x faster than dbgen, multi-arch wheels |
 
 ---
@@ -104,7 +105,7 @@ All commands run from the repo root on your **control machine** unless noted.
 
 ### 1. Configure the cluster YAMLs
 
-Resolve the Ubuntu 22.04 AMI for each architecture and paste into the `ImageId` fields:
+Resolve the Amazon Linux 2023 AMI for each architecture and paste into the `ImageId` fields:
 
 ```bash
 scripts/resolve_ami.sh us-east-1 x86_64    # -> ImageId in infra/ray-cluster/cluster-m7i.yaml
@@ -136,10 +137,12 @@ cd ~/ray-spark-on-graviton
 # re-export the BENCH_* vars here too (or put them in ~/.bashrc on the head)
 
 # Generate TPC-H data to S3 (do this ONCE; both clusters reuse it).
-python -m data.generators.gen_tpch --scale-factor sf100
-python -m data.generators.gen_tpch --scale-factor sf600
+# NOTE: use python3.11 — that's where the deps live on AL2023.
+python3.11 -m data.generators.gen_tpch --scale-factor sf100
+python3.11 -m data.generators.gen_tpch --scale-factor sf600
 
 # Run the full sweep (ray-only + ray+spark), 3 iterations each.
+# run_all.sh already defaults to python3.11 (override with BENCH_PYTHON).
 scripts/run_all.sh --repeat 3 sf10 sf100 sf600
 ```
 
@@ -210,8 +213,8 @@ ray down infra/ray-cluster/cluster-m8g.yaml
 
 Run a subset directly:
 ```bash
-python -m benchmarks.ray_only.run  --sf sf100 --workload q1,sort --repeat 3
-python -m benchmarks.ray_spark.run --sf sf100 --workload q5,q9,hybrid_etl --repeat 3
+python3.11 -m benchmarks.ray_only.run  --sf sf100 --workload q1,sort --repeat 3
+python3.11 -m benchmarks.ray_spark.run --sf sf100 --workload q5,q9,hybrid_etl --repeat 3
 ```
 
 ---
@@ -260,9 +263,10 @@ results/             results.csv, raw/<run_id>.json, comparison.{csv,md}
 ## Troubleshooting
 
 - **Spark `ModuleNotFoundError: No module named 'pyspark'/'ray'` in a python worker**:
-  the executor's `python3` must have ray + pyspark + pyarrow + raydp. On the cluster
-  `python3` is 3.10 (node_setup installs everything there); the cluster YAMLs also pin
-  `PYSPARK_PYTHON=/usr/bin/python3.10` on `ray start`.
+  the executor's Python must have ray + pyspark + pyarrow + raydp. On AL2023 the
+  default `python3` is 3.9 (no deps), so the cluster YAMLs pin
+  `PYSPARK_PYTHON=/usr/bin/python3.11` on `ray start`, and node_setup installs all
+  deps into python3.11. Always invoke the driver as `python3.11` (run_all.sh does).
 - **Spark can't read S3** (`No FileSystem for scheme s3a`): node_setup stages
   `hadoop-aws:3.3.4` + `aws-java-sdk-bundle` into `pyspark/jars`; ensure setup_commands
   completed. Spark reads use the `s3a://` scheme and the EC2 instance role.
