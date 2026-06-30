@@ -86,10 +86,11 @@ def gen_part(table: str, sf: int, parts: int, part: int,
 
 
 def resolve_sf(arg: str):
-    """Accept 'sf100' or a raw integer; return (numeric_sf, label)."""
+    """Accept 'sf100' (preset), any 'sfN', or a raw integer; return (numeric_sf, label)."""
     if arg in SCALE_FACTORS:
         return SCALE_FACTORS[arg], arg
-    sf = int(arg)
+    digits = arg[2:] if arg.lower().startswith("sf") else arg
+    sf = int(digits)
     return sf, f"sf{sf}"
 
 
