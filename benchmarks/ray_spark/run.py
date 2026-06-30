@@ -14,7 +14,8 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, REPO_ROOT)
 
 import ray  # noqa: E402
 
@@ -51,14 +52,17 @@ def main() -> int:
         ap.error(f"unknown workload(s): {unknown}. choose from {ALL_WORKLOADS}")
 
     cfg = get_config()
-    # Propagate the interpreter to every worker/actor this job spawns — including
-    # RayDP's Spark executors — so Spark's Arrow/Python workers (hybrid path) use
-    # the interpreter that has pyspark + pyarrow, not a bare `python3` off PATH.
+    # working_dir ships the repo to all workers (so the hybrid workload module is
+    # importable); env_vars pins the interpreter for RayDP's Spark executors.
     ray.init(address="auto", ignore_reinit_error=True,
-             runtime_env={"env_vars": {
-                 "PYSPARK_PYTHON": sys.executable,
-                 "PYSPARK_DRIVER_PYTHON": sys.executable,
-             }})
+             runtime_env={
+                 "working_dir": REPO_ROOT,
+                 "excludes": [".git", "results", "**/__pycache__", "**/*.parquet"],
+                 "env_vars": {
+                     "PYSPARK_PYTHON": sys.executable,
+                     "PYSPARK_DRIVER_PYTHON": sys.executable,
+                 },
+             })
 
     spark = init_spark(cfg)
     failures = 0

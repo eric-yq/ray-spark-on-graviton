@@ -18,7 +18,8 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, REPO_ROOT)
 
 import ray  # noqa: E402
 
@@ -57,7 +58,12 @@ def main() -> int:
         ap.error(f"unknown workload(s): {unknown}. choose from {list(WORKLOADS)}")
 
     cfg = get_config()
-    ray.init(address="auto", ignore_reinit_error=True)
+    # Ship the repo to every worker so Ray Data tasks can import the workload
+    # module (functions are pickled by reference). file_mounts only copies a few
+    # files to nodes; working_dir uploads the whole project to the cluster.
+    ray.init(address="auto", ignore_reinit_error=True,
+             runtime_env={"working_dir": REPO_ROOT,
+                          "excludes": [".git", "results", "**/__pycache__", "**/*.parquet"]})
     print(f"[ray_only] arch={cfg.arch} sf={sf} workloads={names}")
 
     failures = 0

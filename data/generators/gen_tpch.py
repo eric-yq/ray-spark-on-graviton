@@ -26,7 +26,8 @@ import sys
 import time
 
 # Allow `python data/generators/gen_tpch.py` as well as `-m`.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, REPO_ROOT)
 
 import ray  # noqa: E402
 
@@ -112,7 +113,9 @@ def main() -> None:
     local_root = args.local_root or os.path.join(
         os.environ.get("BENCH_SCRATCH", "/opt/bench/scratch"), "tmp", "gen")
 
-    ray.init(address="auto")
+    ray.init(address="auto",
+             runtime_env={"working_dir": REPO_ROOT,
+                          "excludes": [".git", "results", "**/__pycache__", "**/*.parquet"]})
 
     plan = {t: parts_for(t, sf, args.parts_scale) for t in tables}
     total_parts = sum(plan.values())
