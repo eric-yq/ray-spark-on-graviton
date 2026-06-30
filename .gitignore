@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Ray / Spark runtime
+/tmp/ray/
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Local data + raw results artifacts (keep summary CSV/JSON under results/, ignore bulky raw)
+data/tpch/
+*.parquet
+results/raw/
+results/*.log
+
+# Resolved infra secrets / local overrides
+infra/ray-cluster/*.local.yaml
+.env
+
+# OS
+.DS_Store

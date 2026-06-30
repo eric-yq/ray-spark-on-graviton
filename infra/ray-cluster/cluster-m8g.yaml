@@ -1,0 +1,86 @@
+# ===========================================================================
+# Ray cluster launcher config  —  m8g  (AWS Graviton4, aarch64)
+# ===========================================================================
+# Launch from the CONTROL NODE, at the repo root:
+#     ray up infra/ray-cluster/cluster-m8g.yaml
+#
+# Identical to cluster-m7i.yaml EXCEPT instance types + ImageId architecture.
+# Fill the placeholders before launching:
+#   - ImageId:  run  scripts/resolve_ami.sh us-east-1 arm64
+#   - IamInstanceProfile.Name: same instance profile as the m7i cluster.
+# ===========================================================================
+
+cluster_name: bench-m8g
+
+max_workers: 3
+upscaling_speed: 3
+idle_timeout_minutes: 15
+
+provider:
+  type: aws
+  region: us-east-1
+  availability_zone: us-east-1a
+  cache_stopped_nodes: false
+
+auth:
+  ssh_user: ubuntu
+
+available_node_types:
+  head:
+    min_workers: 0
+    max_workers: 0
+    resources: {}
+    node_config:
+      InstanceType: m8g.2xlarge        # 8 vCPU / 32 GiB
+      ImageId: ami-REPLACE_ARM64       # Ubuntu 22.04 arm64  (scripts/resolve_ami.sh)
+      IamInstanceProfile:
+        Name: ray-bench-node
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 150
+            VolumeType: gp3
+            DeleteOnTermination: true
+
+  worker:
+    min_workers: 3
+    max_workers: 3
+    resources: {}
+    node_config:
+      InstanceType: m8g.4xlarge        # 16 vCPU / 64 GiB
+      ImageId: ami-REPLACE_ARM64
+      IamInstanceProfile:
+        Name: ray-bench-node
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1        # SINGLE 600GB gp3 root: data scratch + Ray/Spark spill
+          Ebs:
+            VolumeSize: 600
+            VolumeType: gp3
+            Iops: 8000
+            Throughput: 500
+            DeleteOnTermination: true
+
+head_node_type: head
+
+file_mounts:
+  "/home/ubuntu/bench/requirements.txt": "requirements.txt"
+  "/home/ubuntu/bench/node_setup.sh": "infra/ray-cluster/node_setup.sh"
+
+setup_commands:
+  - bash /home/ubuntu/bench/node_setup.sh
+
+head_start_ray_commands:
+  - ray stop
+  - >-
+    PYSPARK_PYTHON=/usr/bin/python3.10 PYSPARK_DRIVER_PYTHON=/usr/bin/python3.10
+    ray start --head --port=6379
+    --temp-dir=/opt/bench/scratch/ray
+    --dashboard-host=0.0.0.0
+    --autoscaling-config=~/ray_bootstrap_config.yaml
+
+worker_start_ray_commands:
+  - ray stop
+  - >-
+    PYSPARK_PYTHON=/usr/bin/python3.10 PYSPARK_DRIVER_PYTHON=/usr/bin/python3.10
+    ray start --address=$RAY_HEAD_IP:6379
+    --temp-dir=/opt/bench/scratch/ray
