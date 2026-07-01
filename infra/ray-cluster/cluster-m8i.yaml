@@ -1,0 +1,78 @@
+# ===========================================================================
+# Ray cluster launcher config  —  m8i  (Intel, x86_64)
+# Base image: Amazon Linux 2023 (standard, default kernel).
+# ===========================================================================
+# Launch (do NOT edit this template — launch.sh renders a .local.yaml):
+#     scripts/launch.sh m8i
+#
+# Identical to the other cluster templates EXCEPT instance types + AMI arch.
+# ===========================================================================
+
+cluster_name: bench-m8i
+
+max_workers: 3
+upscaling_speed: 3
+idle_timeout_minutes: 15
+
+provider:
+  type: aws
+  region: us-east-1
+  availability_zone: us-east-1a        # pin one AZ -> low-jitter intra-cluster network
+  cache_stopped_nodes: false           # benchmark nodes are ephemeral; terminate on `ray down`
+
+auth:
+  ssh_user: ec2-user                   # Amazon Linux 2023 default user
+
+available_node_types:
+  head:
+    min_workers: 0
+    max_workers: 0
+    resources: {}
+    node_config:
+      InstanceType: m8i.2xlarge        # 8 vCPU / 32 GiB — scheduler/GCS/dashboard only
+      ImageId: ami-REPLACE_X86_64      # AL2023 x86_64  (scripts/resolve_ami.sh us-east-1 x86_64)
+      IamInstanceProfile:
+        Name: ray-bench-node
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda        # AL2023 root device is xvda (NOT sda1)
+          Ebs:
+            VolumeSize: 150            # GiB, gp3 defaults (3000 IOPS / 125 MB/s) fine for head
+            VolumeType: gp3
+            DeleteOnTermination: true
+
+  worker:
+    min_workers: 3
+    max_workers: 3                     # exactly 3 task nodes
+    resources: {}
+    node_config:
+      InstanceType: m8i.4xlarge        # 16 vCPU / 64 GiB
+      ImageId: ami-REPLACE_X86_64
+      IamInstanceProfile:
+        Name: ray-bench-node
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda        # SINGLE 600GB gp3 root: data scratch + Ray/Spark spill
+          Ebs:
+            VolumeSize: 600
+            VolumeType: gp3
+            Iops: 8000
+            Throughput: 500            # MB/s — within m8i.4xlarge EBS bandwidth ceiling
+            DeleteOnTermination: true
+
+head_node_type: head
+
+# Copied to every node before setup_commands run (paths relative to repo root).
+file_mounts:
+  "/home/ec2-user/bench/requirements.txt": "requirements.txt"
+  "/home/ec2-user/bench/node_setup.sh": "infra/ray-cluster/node_setup.sh"
+  "/home/ec2-user/bench/ray_systemd.sh": "infra/ray-cluster/ray_systemd.sh"
+
+setup_commands:
+  - bash /home/ec2-user/bench/node_setup.sh
+
+# Ray runs as a systemd service (Restart=always, enabled on boot) so it survives
+# the account's security-baseline reboot. See infra/ray-cluster/ray_systemd.sh.
+head_start_ray_commands:
+  - bash /home/ec2-user/bench/ray_systemd.sh head
+
+worker_start_ray_commands:
+  - bash /home/ec2-user/bench/ray_systemd.sh worker $RAY_HEAD_IP

@@ -2,32 +2,46 @@
 
 *English | [中文](README.zh-CN.md)*
 
-A reproducible big-data benchmark for comparing **AWS m7i (Intel Sapphire Rapids, x86_64)**
-against **m8g (AWS Graviton4, aarch64)** on two engines:
+A reproducible big-data benchmark for comparing AWS **Intel (m7i, m8i)** vs
+**Graviton (m8g, m9g)** instances on two engines:
 
 1. **Ray-only** — Ray Data / Ray Core workloads (scan, filter, group-by, sort, broadcast join).
 2. **Ray + Spark hybrid** — SparkSQL running *on* the Ray cluster via [RayDP](https://github.com/oap-project/raydp),
    plus a genuine in-memory `Ray Data -> Spark` handoff.
 
 Each architecture runs an identical cluster: **1 scheduler/head + 3 task/worker nodes**,
-provisioned with the native Ray cluster launcher (`ray up`). The two clusters differ
-**only** in CPU architecture — every software version, instance size, EBS spec, and
-workload is held constant so the comparison isolates the hardware.
+provisioned with the native Ray cluster launcher (`ray up`). Clusters differ **only** in
+instance family — every software version, instance size, EBS spec, and workload is held
+constant so the comparison isolates the hardware.
 
 ---
 
 ## Topology
 
-| Role   | Count | m7i           | m8g           | vCPU / RAM   | Disk                          |
-|--------|-------|---------------|---------------|--------------|-------------------------------|
-| head   | 1     | m7i.2xlarge   | m8g.2xlarge   | 8 / 32 GiB   | 150 GB gp3                    |
-| worker | 3     | m7i.4xlarge   | m8g.4xlarge   | 16 / 64 GiB  | **600 GB gp3, 8000 IOPS, 500 MB/s** |
+Per role, all architectures use the same size class:
+
+| Role   | Count | size    | vCPU / RAM   | Disk                          |
+|--------|-------|---------|--------------|-------------------------------|
+| head   | 1     | 2xlarge | 8 / 32 GiB   | 150 GB gp3                    |
+| worker | 3     | 4xlarge | 16 / 64 GiB  | **600 GB gp3, 8000 IOPS, 500 MB/s** |
 
 Worker cluster total: 48 vCPU / 192 GiB. The single 600 GB gp3 root volume on each
 worker holds the OS plus all scratch (Ray object spill + Spark shuffle) under
 `/opt/bench/scratch`.
 
-## Software (identical on both architectures)
+### Supported architectures
+
+| family | CPU                | head        | worker      | cluster on-demand $/hr* |
+|--------|--------------------|-------------|-------------|-------------------------|
+| m7i    | Intel, x86_64      | m7i.2xlarge | m7i.4xlarge | 2.8224 |
+| m8i    | Intel, x86_64      | m8i.2xlarge | m8i.4xlarge | 2.9635 |
+| m8g    | Graviton, arm64    | m8g.2xlarge | m8g.4xlarge | 2.5133 |
+| m9g    | Graviton, arm64    | m9g.2xlarge | m9g.4xlarge | 2.7395 |
+
+\* 1 head + 3 workers, us-east-1 Linux on-demand (user-provided 2026-07 figures;
+override per instance via `BENCH_PRICE_<INSTANCE>`). m7i is the default report baseline.
+
+## Software (identical on every architecture)
 
 | Component | Version | Notes |
 |-----------|---------|-------|
@@ -164,6 +178,8 @@ ray rsync-up infra/ray-cluster/cluster-m7i.local.yaml ./ '~/ray-spark-on-gravito
 ray attach   infra/ray-cluster/cluster-m7i.local.yaml             # SSH into the head node
 ```
 Use the rendered `*.local.yaml` (not the template) for every ray command after launch.
+`launch.sh` accepts **`m7i` | `m8i` | `m8g` | `m9g`** (resolves the right x86_64/arm64 AMI
+automatically). Run the full flow once per family you want to compare.
 
 ### 4. On the head node: generate data (once) and run the sweep
 
@@ -199,18 +215,23 @@ scripts/run_all.sh --repeat 3 sf10 sf100 sf600     # data already in S3; no rege
 
 ### 6. Build the comparison report
 
-From your control machine (pulls both clusters' results from S3):
+From your control machine (pulls every cluster's results from S3):
 
 ```bash
-python scripts/report.py --from-s3 s3://your-bucket/results
+python scripts/report.py --from-s3 s3://your-bucket/results   # baseline defaults to m7i
+python scripts/report.py --from-s3 s3://your-bucket/results --baseline m8g
 ```
-Produces `results/comparison.csv` and `results/comparison.md` with, per workload:
+Produces `results/comparison.csv` and `.md` with one row per (workload, arch); each
+non-baseline arch is scored against the baseline (default m7i):
 
-| metric | meaning |
+| column | meaning |
 |--------|---------|
-| `speedup_m8g`     | `m7i_best_wall / m8g_best_wall` — **> 1 means m8g is faster** |
-| `cost_savings_pct`| `(m7i_cost - m8g_cost) / m7i_cost` at best wall — **> 0 means m8g cheaper** |
-| `price_perf_m8g`  | `m7i_cost_per_run / m8g_cost_per_run` — **> 1 means m8g better $/work** |
+| `best_s` / `median_s`  | best / median wall-clock across `--repeat` iterations |
+| `cost_usd`             | on-demand cost of that best run (cluster $/hr × best_s) |
+| `speedup_vs_m7i`       | `m7i_best / arch_best` — **> 1 means faster than m7i** |
+| `priceperf_vs_m7i`     | `m7i_cost / arch_cost` — **> 1 means more work per dollar** |
+
+(Baseline rows are 1.0 by definition. Use `--baseline` to compare against a different family.)
 
 ### 7. Tear down
 
@@ -288,7 +309,7 @@ results/             results.csv, raw/<run_id>.json, comparison.{csv,md}
 | `BENCH_RESULTS_PREFIX`   | `s3://<bucket>/results` | result upload root (empty = local only) |
 | `BENCH_RESULTS_DIR`      | `results`      | local results dir |
 | `BENCH_REGION`           | `us-east-1`    | AWS region |
-| `BENCH_ARCH`             | auto (CPU)     | `m7i` or `m8g` tag override |
+| `BENCH_ARCH`             | auto (EC2 metadata) | force arch tag: `m7i`/`m8i`/`m8g`/`m9g` |
 | `BENCH_SCRATCH`          | `/opt/bench/scratch` | Ray/Spark spill root |
 | `BENCH_SPARK_EXECUTORS`  | `3`            | Spark executors (= workers) |
 | `BENCH_SPARK_EXECUTOR_CORES` | `15`       | cores per executor |

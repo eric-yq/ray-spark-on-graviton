@@ -18,8 +18,16 @@ from typing import Dict
 NUM_WORKERS = 3
 
 ARCH_INSTANCES: Dict[str, Dict[str, str]] = {
-    "m7i": {"head": "m7i.2xlarge", "worker": "m7i.4xlarge"},
-    "m8g": {"head": "m8g.2xlarge", "worker": "m8g.4xlarge"},
+    "m7i": {"head": "m7i.2xlarge", "worker": "m7i.4xlarge"},   # Intel (Sapphire Rapids)
+    "m8i": {"head": "m8i.2xlarge", "worker": "m8i.4xlarge"},   # Intel (newer gen)
+    "m8g": {"head": "m8g.2xlarge", "worker": "m8g.4xlarge"},   # Graviton4
+    "m9g": {"head": "m9g.2xlarge", "worker": "m9g.4xlarge"},   # Graviton (newer gen)
+}
+
+# CPU architecture per family — used to pick the right AMI (x86_64 vs arm64).
+ARCH_FAMILY: Dict[str, str] = {
+    "m7i": "x86_64", "m8i": "x86_64",
+    "m8g": "arm64",  "m9g": "arm64",
 }
 
 # ---------------------------------------------------------------------------
@@ -44,25 +52,50 @@ SPARK_LOCAL_DIR = f"{SCRATCH_DIR}/spark"
 
 # ---------------------------------------------------------------------------
 # On-demand Linux pricing, us-east-1, USD/hr.
-# Documented defaults captured at build time (2026-06). VERIFY for your region
-# and override via env BENCH_PRICE_<INSTANCE> or scripts/refresh_prices.py.
+# User-provided figures (2026-07). VERIFY for your region and override via env
+# BENCH_PRICE_<INSTANCE> (e.g. BENCH_PRICE_M9G_4XLARGE=0.78) or the Pricing API.
 # ---------------------------------------------------------------------------
 DEFAULT_PRICES_USD_HR: Dict[str, float] = {
-    "m7i.2xlarge": 0.4032,
-    "m7i.4xlarge": 0.8064,
-    "m8g.2xlarge": 0.35808,
-    "m8g.4xlarge": 0.71616,
+    "m7i.2xlarge": 0.4032,   "m7i.4xlarge": 0.8064,
+    "m8i.2xlarge": 0.42336,  "m8i.4xlarge": 0.84672,
+    "m8g.2xlarge": 0.35904,  "m8g.4xlarge": 0.71808,
+    "m9g.2xlarge": 0.39136,  "m9g.4xlarge": 0.78272,
 }
 
 
+def _imds_instance_family(timeout: float = 0.3) -> str:
+    """Return the EC2 instance family (e.g. 'm8i') via IMDSv2, or '' if unavailable."""
+    import urllib.request
+    try:
+        tok_req = urllib.request.Request(
+            "http://169.254.169.254/latest/api/token", method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"})
+        token = urllib.request.urlopen(tok_req, timeout=timeout).read().decode()
+        it_req = urllib.request.Request(
+            "http://169.254.169.254/latest/meta-data/instance-type",
+            headers={"X-aws-ec2-metadata-token": token})
+        instance_type = urllib.request.urlopen(it_req, timeout=timeout).read().decode()
+        return instance_type.split(".", 1)[0]      # 'm8i.2xlarge' -> 'm8i'
+    except Exception:
+        return ""
+
+
 def _detect_arch() -> str:
-    """Best-effort arch default from the host CPU (overridden by BENCH_ARCH)."""
+    """Auto-detect the arch tag (overridden by BENCH_ARCH).
+
+    m7i/m8i are both x86_64 and m8g/m9g are both arm64, so the CPU arch alone is
+    ambiguous. Prefer the exact instance family from EC2 metadata; fall back to a
+    CPU-arch default only if metadata is unavailable (e.g. running off-EC2).
+    """
+    fam = _imds_instance_family()
+    if fam in ARCH_INSTANCES:
+        return fam
     return "m8g" if platform.machine().lower() in ("aarch64", "arm64") else "m7i"
 
 
 @dataclass
 class BenchConfig:
-    arch: str                       # "m7i" | "m8g"
+    arch: str                       # "m7i" | "m8i" | "m8g" | "m9g"
     region: str
     s3_bucket: str
     data_prefix: str                # s3://<bucket>/<path> root holding <sf>/<table>/

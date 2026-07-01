@@ -21,11 +21,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ARCH_KEY="${1:?usage: scripts/launch.sh m7i|m8g [extra ray up args...]}"; shift || true
+ARCH_KEY="${1:?usage: scripts/launch.sh m7i|m8i|m8g|m9g [extra ray up args...]}"; shift || true
 case "$ARCH_KEY" in
-  m7i) AMI_ARCH=x86_64 ;;
-  m8g) AMI_ARCH=arm64 ;;
-  *) echo "first arg must be 'm7i' or 'm8g'" >&2; exit 1 ;;
+  m7i|m8i) AMI_ARCH=x86_64 ;;   # Intel
+  m8g|m9g) AMI_ARCH=arm64 ;;    # Graviton
+  *) echo "first arg must be one of: m7i m8i m8g m9g" >&2; exit 1 ;;
 esac
 
 REGION="${BENCH_REGION:-us-east-1}"
