@@ -109,6 +109,10 @@ def persist(result: BenchmarkResult, results_dir: str = "results",
 
     if s3_results_prefix.startswith("s3://"):
         base = s3_results_prefix.rstrip("/")
+        # raw/<run_id>.json is the per-run source of truth the report reads.
         _upload_s3(json_path, f"{base}/raw/{result.run_id}.json")
-        # keep a per-run copy of the CSV too (atomic, no concurrent-append clobber)
-        _upload_s3(csv_path, f"{base}/results-{result.run_id}.csv")
+        # ONE cumulative CSV per architecture, overwritten each run (S3 objects
+        # can't be appended). Avoids the per-run-CSV clutter while keeping a
+        # human-readable snapshot; m7i and m8g use distinct keys so they never
+        # clobber each other.
+        _upload_s3(csv_path, f"{base}/results-{result.arch}.csv")
